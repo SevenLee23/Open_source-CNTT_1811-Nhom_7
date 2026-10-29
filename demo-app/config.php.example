@@ -1,0 +1,11 @@
+<?php
+return [
+    'endpoint' => 'http://127.0.0.1/Open_source-CNTT_1811-Nhom_7/api.php',
+    'api_key' => 'PASTE_STAGING_API_KEY_HERE',
+    'environment' => 'staging',
+    'fallback' => [
+        'new_dashboard' => false,
+        'beta_search' => false,
+        'dark_mode' => false,
+    ],
+];

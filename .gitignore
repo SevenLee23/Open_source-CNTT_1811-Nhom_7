@@ -1,0 +1,7 @@
+.env
+/storage/logs/*.log
+/storage/cache/*
+/database/*.sqlite
+/database/*.sql.gz
+/vendor/
+/demo-app/cache/
