@@ -9,7 +9,7 @@ class Version extends Record
 
     public static function forEnvironment($environmentId)
     {
-        $statement = Database::connection()->prepare('SELECT v.*,u.name created_by_name,p.version_number parent_number FROM versions v JOIN users u ON u.id=v.created_by LEFT JOIN versions p ON p.id=v.parent_version_id WHERE v.environment_id=? ORDER BY v.version_number DESC');
+        $statement = Database::connection()->prepare('SELECT v.*,u.name created_by_name,publisher.name published_by_name,p.version_number parent_number FROM versions v JOIN users u ON u.id=v.created_by LEFT JOIN users publisher ON publisher.id=v.published_by LEFT JOIN versions p ON p.id=v.parent_version_id WHERE v.environment_id=? ORDER BY v.version_number DESC');
         $statement->execute([(int) $environmentId]);
         return $statement->fetchAll();
     }

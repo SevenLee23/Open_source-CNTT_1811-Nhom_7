@@ -17,23 +17,19 @@ final class EvaluateController extends Controller
         header('Cache-Control: no-store');
         if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204); return; }
         $context = (new AuthenticateEnvironmentKey())->authenticate();
-        if (!$context) return $this->json(['success' => false, 'message' => 'A valid environment API key is required.'], 401);
+        if (!$context) return $this->json(['success' => false, 'message' => 'A valid project API key is required.'], 401);
         try { $input = EvaluateRequest::validate($this->inputJson()); }
         catch (\Throwable $exception) { return $this->json(['success' => false, 'message' => $exception->getMessage()], 422); }
+        if ($input['environment'] === '') return $this->json(['success' => false, 'message' => 'The environment field is required. Use staging or production_sim.'], 422);
         if (empty($context['environment_id'])) {
-            $environmentKey = $input['environment'] !== '' ? $input['environment'] : 'staging';
+            $environmentKey = $input['environment'];
             $environment = Database::connection()->prepare('SELECT id,`key` FROM environments WHERE project_id=? AND `key`=? LIMIT 1');
             $environment->execute([(int) $context['project_id'], $environmentKey]);
             $selected = $environment->fetch();
-            if (!$selected && $input['environment'] === '') {
-                $environment = Database::connection()->prepare('SELECT id,`key` FROM environments WHERE project_id=? ORDER BY id LIMIT 1');
-                $environment->execute([(int) $context['project_id']]);
-                $selected = $environment->fetch();
-            }
-            if (!$selected) return $this->json(['success' => false, 'message' => 'Unknown environment for this account API key.'], 422);
+            if (!$selected) return $this->json(['success' => false, 'message' => 'Unknown environment for this project API key.'], 422);
             $context['environment_id'] = (int) $selected['id'];
             $context['environment_key'] = $selected['key'];
-        } elseif ($input['environment'] !== '' && $input['environment'] !== $context['environment_key']) {
+        } elseif ($input['environment'] !== $context['environment_key']) {
             return $this->json(['success' => false, 'message' => 'The API key is restricted to environment ' . $context['environment_key'] . '.'], 403);
         }
         try {
@@ -45,7 +41,7 @@ final class EvaluateController extends Controller
                 if (isset($known[$key])) {
                     $requested[$key] = $known[$key];
                 } else {
-                    $requested[$key] = ['value' => false, 'reason' => 'unknown_flag', 'matched_rule_id' => null, 'bucket' => null];
+                    $requested[$key] = ['value' => false, 'reason' => 'unknown_flag', 'matched_rule_id' => null, 'bucket' => null, 'fallback_value' => false];
                     $pdo = Database::connection();
                     $pdo->prepare('INSERT INTO decision_logs (project_id,environment_id,version_id,user_id,flag_key,result,reason_code,created_at) VALUES (?,?,?,?,?,0,?,NOW())')
                         ->execute([(int) $context['project_id'], (int) $context['environment_id'], $result['version_id'] ?? null, $input['user_id'], $key, 'unknown_flag']);

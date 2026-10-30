@@ -21,9 +21,9 @@ final class ChildController extends Controller
     {
         $user = $this->child();
         $projectId = Auth::projectId();
-        if (!$projectId) { http_response_code(403); exit('Tài khoản con chưa được gán workspace.'); }
+        if (!$projectId) { http_response_code(403); exit('Tài khoản được quản lý chưa được gán workspace.'); }
         $project = Project::findForUser($projectId, (int) $user['id']);
-        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc tài khoản cha.'); }
+        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc chủ dự án.'); }
         $projects = array_values(array_filter(Project::forUser((int) $user['id']), function ($item) use ($user) { return (int) $item['created_by'] === (int) $user['parent_user_id']; }));
         $environments = Environment::forProject($projectId);
         $environmentId = Auth::environmentId($projectId);
@@ -36,12 +36,56 @@ final class ChildController extends Controller
         $membershipQuery->execute([$projectId, (int) $user['id']]);
         $membershipId = (int) $membershipQuery->fetchColumn();
         $versionId = (int) ($current['id'] ?? 0);
-        $query = Database::connection()->prepare('SELECT f.id,f.`key`,f.name,f.description,COALESCE(vf.default_value,0) default_value,COALESCE(vf.kill_switch,0) kill_switch,vf.forced_value,COALESCE(vf.rollout_enabled,0) rollout_enabled,COALESCE(vf.rollout_percentage,0) rollout_percentage,CASE WHEN p.can_toggle=1 THEN 1 ELSE 0 END can_toggle FROM flags f JOIN feature_catalog c ON c.id=f.catalog_feature_id AND c.is_active=1 LEFT JOIN subaccount_flag_permissions p ON p.flag_id=f.id AND p.membership_id=? AND p.can_toggle=1 LEFT JOIN version_flags vf ON vf.flag_id=f.id AND vf.version_id=? WHERE f.project_id=? AND f.is_active=1 ORDER BY f.name');
+        $query = Database::connection()->prepare('SELECT f.id,f.`key`,f.name,f.description,COALESCE(vf.default_value,0) default_value,f.emergency_kill_switch kill_switch,vf.forced_value,CASE WHEN p.can_toggle=1 THEN 1 ELSE 0 END can_toggle FROM flags f JOIN feature_catalog c ON c.id=f.catalog_feature_id AND c.is_active=1 LEFT JOIN subaccount_flag_permissions p ON p.flag_id=f.id AND p.membership_id=? AND p.can_toggle=1 LEFT JOIN version_flags vf ON vf.flag_id=f.id AND vf.version_id=? WHERE f.project_id=? AND f.is_active=1 ORDER BY f.name');
         $query->execute([$membershipId, $versionId, $projectId]);
         $flags = $query->fetchAll();
         $previous = $currentDraft ? $currentPublished : $this->previousPublishedVersion($environmentId, $currentPublished);
         $hasTogglePermission = (bool) array_filter($flags, function ($flag) { return (int) $flag['can_toggle'] === 1; });
-        $this->view('child-dashboard', compact('user','project','projects','projectId','environment','environments','environmentId','current','flags','previous','hasTogglePermission','isTestEnvironment'));
+        $canViewAudit = Auth::canViewAudit($projectId);
+        $this->renderChild('child-dashboard', compact('user','project','projects','projectId','environment','environments','environmentId','current','flags','previous','hasTogglePermission','isTestEnvironment','canViewAudit'));
+    }
+
+    public function logs()
+    {
+        $user = $this->child();
+        $projectId = Auth::projectId();
+        if (!Auth::canViewAudit($projectId)) { http_response_code(403); exit('Chưa được cấp quyền xem Log của dự án này.'); }
+        $project = Project::findForUser($projectId, (int) $user['id']);
+        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc quyền truy cập của tài khoản này.'); }
+        $projects = array_values(array_filter(Project::forUser((int) $user['id']), function ($item) use ($user) { return (int) $item['created_by'] === (int) $user['parent_user_id']; }));
+        $environments = Environment::forProject($projectId);
+        $environmentId = Auth::environmentId($projectId);
+        $environment = Environment::find($environmentId);
+        $canViewAudit = true;
+        $audit = \App\Models\AuditLog::forProject($projectId);
+        $pdo = Database::connection();
+        $decisionsQuery = $pdo->prepare('SELECT d.created_at,d.environment_id,e.name environment_name,d.version_id,v.version_number,d.user_id,d.flag_key,d.result,d.reason_code FROM decision_logs d JOIN environments e ON e.id=d.environment_id LEFT JOIN versions v ON v.id=d.version_id WHERE d.project_id=? ORDER BY d.id DESC LIMIT 100');
+        $decisionsQuery->execute([$projectId]);
+        $decisions = $decisionsQuery->fetchAll();
+        $logsQuery = $pdo->prepare('SELECT l.*,u.name uploader_name FROM project_logs l LEFT JOIN users u ON u.id=l.uploaded_by WHERE l.project_id=? ORDER BY l.id DESC LIMIT 100');
+        $logsQuery->execute([$projectId]);
+        $projectLogs = $logsQuery->fetchAll();
+        $this->renderChild('child-logs', compact('user','project','projects','projectId','environments','environmentId','environment','canViewAudit','audit','decisions','projectLogs'));
+    }
+
+    public function switchContext()
+    {
+        $user = $this->child();
+        $projectId = (int) ($_POST['project_id'] ?? 0);
+        $project = Project::findForUser($projectId, (int) $user['id']);
+        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc quyền truy cập của tài khoản này.'); }
+        $environmentId = (int) ($_POST['environment_id'] ?? 0);
+        $environmentQuery = Database::connection()->prepare('SELECT id FROM environments WHERE id=? AND project_id=?');
+        $environmentQuery->execute([$environmentId, $projectId]);
+        if (!$environmentQuery->fetchColumn()) {
+            $environmentQuery = Database::connection()->prepare("SELECT id FROM environments WHERE project_id=? ORDER BY CASE WHEN `key`='staging' THEN 0 ELSE 1 END,id LIMIT 1");
+            $environmentQuery->execute([$projectId]);
+            $environmentId = (int) $environmentQuery->fetchColumn();
+        }
+        if (!$environmentId) { http_response_code(404); exit('Dự án chưa có môi trường khả dụng.'); }
+        $_SESSION['project_id'] = $projectId;
+        $_SESSION['environment_id'] = $environmentId;
+        redirect('child/dashboard');
     }
 
     public function switchProject()
@@ -49,7 +93,7 @@ final class ChildController extends Controller
         $user = $this->child();
         $projectId = (int) ($_POST['project_id'] ?? 0);
         $project = Project::findForUser($projectId, (int) $user['id']);
-        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc tài khoản cha.'); }
+        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc chủ dự án.'); }
         $_SESSION['project_id'] = $projectId;
         unset($_SESSION['environment_id']);
         redirect('child/dashboard');
@@ -62,7 +106,7 @@ final class ChildController extends Controller
         $environmentId = (int) ($_POST['environment_id'] ?? 0);
         $query = Database::connection()->prepare('SELECT id FROM environments WHERE id=? AND project_id=?');
         $query->execute([$environmentId, $projectId]);
-        if (!$query->fetchColumn()) { http_response_code(403); exit('Môi trường không thuộc tài khoản cha.'); }
+        if (!$query->fetchColumn()) { http_response_code(403); exit('Môi trường không thuộc chủ dự án.'); }
         $_SESSION['environment_id'] = $environmentId;
         redirect('child/dashboard');
     }
@@ -80,25 +124,56 @@ final class ChildController extends Controller
         $flag = $check->fetch();
         $env = Database::connection()->prepare('SELECT id FROM environments WHERE id=? AND project_id=?');
         $env->execute([$environmentId, $projectId]);
-        if (!$flag || !$env->fetchColumn()) { http_response_code(403); exit('Feature hoặc môi trường không thuộc tài khoản cha.'); }
+        if (!$flag || !$env->fetchColumn()) { http_response_code(403); exit('Feature hoặc môi trường không thuộc chủ dự án.'); }
         try {
             $versions = new VersionService();
-            $draft = $versions->createDraft($environmentId, (int) $user['id'], null, 'Tài khoản con đổi ' . $flag['key'], false);
+            $draft = $versions->createDraft($environmentId, (int) $user['id'], null, 'Tài khoản được quản lý đổi ' . $flag['key'], false);
             $pdo = Database::connection();
             $read = $pdo->prepare('SELECT id FROM version_flags WHERE version_id=? AND flag_id=?');
             $read->execute([(int) $draft['id'], $flagId]);
             $configId = (int) $read->fetchColumn();
             if (!$configId) {
-                $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,created_at,updated_at) VALUES (?,?,0,?,0,0,0,?,NOW(),NOW())')
-                    ->execute([(int) $draft['id'], $flagId, $enabled ? 1 : 0, $enabled ? 1 : 0]);
+                $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,created_at,updated_at) VALUES (?,?,0,?,0,0,?,?,NOW(),NOW())')
+                    ->execute([(int) $draft['id'], $flagId, $enabled ? 1 : 0, $enabled ? 1 : 0, $enabled ? 1 : 0]);
                 $configId = (int) $pdo->lastInsertId();
             }
-            $pdo->prepare('UPDATE version_flags SET forced_value=?,default_value=?,rollout_enabled=0,rollout_percentage=0,updated_at=NOW() WHERE id=? AND version_id=?')
-                ->execute([$enabled ? 1 : 0, $enabled ? 1 : 0, $configId, (int) $draft['id']]);
-            (new AuditLogService())->record($projectId, (int) $user['id'], 'subaccount.feature_toggled', 'flag', $flag['key'], null, ['enabled' => $enabled], 'Tài khoản con bật/tắt feature', $environmentId, (int) $draft['id']);
+            $pdo->prepare('UPDATE version_flags SET forced_value=?,default_value=?,fallback_value=?,rollout_enabled=0,rollout_percentage=0,updated_at=NOW() WHERE id=? AND version_id=?')
+                ->execute([$enabled ? 1 : 0, $enabled ? 1 : 0, $enabled ? 1 : 0, $configId, (int) $draft['id']]);
+            (new AuditLogService())->record($projectId, (int) $user['id'], 'subaccount.feature_toggled', 'flag', $flag['key'], null, ['enabled' => $enabled], 'Tài khoản được quản lý bật/tắt feature', $environmentId, (int) $draft['id']);
             flash('success', 'Đã lưu trạng thái ' . ($enabled ? 'bật' : 'tắt') . ' của ' . $flag['key'] . ' vào bản nháp thử nghiệm.');
         } catch (\Throwable $exception) {
             flash('error', 'Không đổi được trạng thái feature: ' . $exception->getMessage());
+        }
+        $_SESSION['environment_id'] = $environmentId;
+        redirect('child/dashboard');
+    }
+
+    public function publish()
+    {
+        $user = $this->child();
+        $projectId = Auth::projectId();
+        $environmentId = (int) ($_POST['environment_id'] ?? 0);
+        $this->requireTestEnvironment($projectId, $environmentId);
+        $permission = Database::connection()->prepare('SELECT COUNT(*) FROM project_memberships m JOIN subaccount_flag_permissions p ON p.membership_id=m.id AND p.can_toggle=1 JOIN flags f ON f.id=p.flag_id AND f.project_id=m.project_id AND f.is_active=1 WHERE m.project_id=? AND m.user_id=?');
+        $permission->execute([$projectId, (int) $user['id']]);
+        if (!(int) $permission->fetchColumn()) { http_response_code(403); exit('Tài khoản chưa được cấp quyền bật/tắt tính năng trong dự án này.'); }
+        $draft = \App\Models\Version::draft($environmentId, (int) $user['id']);
+        if (!$draft || (int) $draft['project_id'] !== (int) $projectId || $draft['status'] !== 'draft') {
+            flash('error', 'Không tìm thấy bản nháp để phát hành.');
+            $_SESSION['environment_id'] = $environmentId;
+            redirect('child/dashboard');
+        }
+        $reason = trim((string) ($_POST['reason'] ?? ''));
+        if ($reason === '') {
+            flash('error', 'Nhập lý do phát hành trước khi tiếp tục.');
+            $_SESSION['environment_id'] = $environmentId;
+            redirect('child/dashboard');
+        }
+        try {
+            (new VersionService())->publish((int) $draft['id'], (int) $user['id'], $reason);
+            flash('success', 'Đã phát hành v' . (int) $draft['version_number'] . '.');
+        } catch (\Throwable $exception) {
+            flash('error', 'Không phát hành được bản nháp: ' . $exception->getMessage());
         }
         $_SESSION['environment_id'] = $environmentId;
         redirect('child/dashboard');
@@ -135,7 +210,7 @@ final class ChildController extends Controller
         try {
             $versions = new VersionService();
             $draft = $versions->createDraft($environmentId, (int) $user['id'], (int) $current['id'], 'Khôi phục trạng thái đã lưu', false);
-            $oldValues = $pdo->prepare('SELECT kill_switch,default_value,forced_value,rollout_enabled,rollout_percentage FROM version_flags WHERE version_id=? AND flag_id=?');
+            $oldValues = $pdo->prepare('SELECT kill_switch,default_value,forced_value FROM version_flags WHERE version_id=? AND flag_id=?');
             $draftFlag = $pdo->prepare('SELECT id FROM version_flags WHERE version_id=? AND flag_id=?');
             $insertDraftFlag = $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,created_at,updated_at) VALUES (?,?,0,0,0,0,0,NOW(),NOW())');
             $setState = $pdo->prepare('UPDATE version_flags SET kill_switch=0,forced_value=?,default_value=?,rollout_enabled=0,rollout_percentage=0,updated_at=NOW() WHERE id=? AND version_id=?');
@@ -179,18 +254,17 @@ final class ChildController extends Controller
 
     private function enabledInSnapshot(array $config)
     {
-        if ((int) $config['kill_switch'] === 1) return false;
         if ($config['forced_value'] !== null) return (bool) $config['forced_value'];
-        return (bool) $config['default_value'] || ((bool) $config['rollout_enabled'] && (float) $config['rollout_percentage'] > 0);
+        return (bool) $config['default_value'];
     }
 
     private function child()
     {
         $user = $this->user();
-        if ($user['account_type'] !== 'child' || empty($user['parent_user_id'])) { http_response_code(403); exit('Trang này chỉ dành cho tài khoản con.'); }
+        if ($user['account_type'] !== 'child' || empty($user['parent_user_id'])) { http_response_code(403); exit('Trang này chỉ dành cho tài khoản được quản lý.'); }
         $projectId = Auth::projectId();
         $project = $projectId ? Project::findForUser($projectId, (int) $user['id']) : null;
-        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc tài khoản cha.'); }
+        if (!$project || (int) $project['created_by'] !== (int) $user['parent_user_id']) { http_response_code(403); exit('Dự án không thuộc chủ dự án.'); }
         return $user;
     }
 }

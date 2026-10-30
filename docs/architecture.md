@@ -16,10 +16,9 @@ Published configuration is stored as a version snapshot. Editing starts from a d
 2. A child-account forced toggle applies to the whole feature.
 3. A matching explicit user rule wins.
 4. A matching group rule wins, ordered by ascending priority and then rule ID.
-5. If percentage rollout is enabled, a deterministic SHA-256 bucket based on project, environment, feature key, and application user ID selects the cohort. The version is intentionally excluded so users do not churn on each publication.
-6. Otherwise the feature's default value is returned.
+5. Otherwise the feature's default value is returned.
 
-The API key is scoped to one environment. The management user account and application user IDs evaluated by the API are separate concepts.
+The read-only API key is scoped to a project. Each evaluation request must specify the environment key (`staging` or `production_sim`); publishing copies the Staging snapshot into a separate Release version and advances the Release environment's current version. The management user account and application user IDs evaluated by the API are separate concepts.
 
 ## Access model
 

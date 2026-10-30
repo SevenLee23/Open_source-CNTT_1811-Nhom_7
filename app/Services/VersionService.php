@@ -72,13 +72,13 @@ final class VersionService
     {
         $configs = $pdo->prepare('SELECT * FROM version_flags WHERE version_id=? ORDER BY id');
         $configs->execute([(int) $sourceId]);
-        $configInsert = $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
+        $configInsert = $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,created_at,updated_at) VALUES (?,?,?,?,0,0,?,?,?,?)');
         $ruleRead = $pdo->prepare('SELECT * FROM rules WHERE version_flag_id=? ORDER BY id');
         $ruleInsert = $pdo->prepare('INSERT INTO rules (version_flag_id,target_type,effect,priority,target_group_id,created_at,updated_at) VALUES (?,?,?,?,?,NOW(),NOW())');
         $userRead = $pdo->prepare('SELECT user_id FROM rule_users WHERE rule_id=?');
         $userInsert = $pdo->prepare('INSERT INTO rule_users (rule_id,user_id,created_at) VALUES (?,?,NOW())');
         foreach ($configs->fetchAll() as $config) {
-            $configInsert->execute([$targetId, $config['flag_id'], $config['kill_switch'], $config['default_value'], $config['rollout_enabled'], $config['rollout_percentage'], $config['fallback_value'], $config['forced_value'], date('Y-m-d H:i:s'), date('Y-m-d H:i:s')]);
+            $configInsert->execute([$targetId, $config['flag_id'], $config['kill_switch'], $config['default_value'], $config['fallback_value'], $config['forced_value'], date('Y-m-d H:i:s'), date('Y-m-d H:i:s')]);
             $newConfigId = (int) $pdo->lastInsertId();
             $ruleRead->execute([(int) $config['id']]);
             foreach ($ruleRead->fetchAll() as $rule) {
@@ -100,15 +100,57 @@ final class VersionService
             if (!$version) throw new \DomainException('Không tìm thấy phiên bản.');
             if (strtolower((string) $version['environment_key']) !== 'staging') throw new \DomainException('Môi trường phát hành chỉ xem; chỉ phát hành phiên bản trong Staging.');
             if ($version['status'] !== VersionStatus::DRAFT) throw new \DomainException('Bản đã phát hành là bất biến. Hãy tạo phiên bản mới.');
+            $releaseQuery = $pdo->prepare("SELECT * FROM environments WHERE project_id=? AND `key`='production_sim' FOR UPDATE");
+            $releaseQuery->execute([(int) $version['project_id']]);
+            $releaseEnvironment = $releaseQuery->fetch();
+            if (!$releaseEnvironment) throw new \DomainException('Dự án chưa có môi trường Phát hành.');
+            $releaseNumberQuery = $pdo->prepare('SELECT COALESCE(MAX(version_number),0)+1 FROM versions WHERE environment_id=?');
+            $releaseNumberQuery->execute([(int) $releaseEnvironment['id']]);
+            $releaseNumber = (int) $releaseNumberQuery->fetchColumn();
+            $releaseInsert = $pdo->prepare("INSERT INTO versions (project_id,environment_id,version_number,status,parent_version_id,change_reason,created_by,published_by,created_at,updated_at,published_at) VALUES (?,?,?,'published',?,?,?,?,NOW(),NOW(),NOW())");
+            $releaseReason = 'Phát hành từ Staging v' . (int) $version['version_number'] . ($reason !== null && trim((string) $reason) !== '' ? ': ' . trim((string) $reason) : '');
+            $releaseInsert->execute([(int) $version['project_id'], (int) $releaseEnvironment['id'], $releaseNumber, $releaseEnvironment['current_version_id'] ?: null, $releaseReason, (int) $userId, (int) $userId]);
+            $releaseVersionId = (int) $pdo->lastInsertId();
+            $this->copyVersionSnapshot($pdo, (int) $versionId, $releaseVersionId);
             $pdo->prepare("UPDATE versions SET status='published',published_by=?,published_at=NOW(),change_reason=COALESCE(?,change_reason),updated_at=NOW() WHERE id=?")
                 ->execute([(int) $userId, $reason, (int) $versionId]);
             $pdo->prepare('UPDATE environments SET current_version_id=?,updated_at=NOW() WHERE id=? AND project_id=?')
                 ->execute([(int) $versionId, (int) $version['environment_id'], (int) $version['project_id']]);
+            $pdo->prepare('UPDATE environments SET current_version_id=?,updated_at=NOW() WHERE id=? AND project_id=?')
+                ->execute([$releaseVersionId, (int) $releaseEnvironment['id'], (int) $version['project_id']]);
             $this->audit->record((int) $version['project_id'], $userId, 'version.published', 'version', (string) $version['version_number'], ['status' => 'draft'], ['status' => 'published'], $reason ?: $version['change_reason'], (int) $version['environment_id'], (int) $versionId);
-            $query = $pdo->prepare('SELECT * FROM versions WHERE id=?');
-            $query->execute([(int) $versionId]);
-            return $query->fetch();
+            $this->audit->record((int) $version['project_id'], $userId, 'version.promoted_to_release', 'version', (string) $releaseNumber, ['current_version_id' => $releaseEnvironment['current_version_id'] ? (int) $releaseEnvironment['current_version_id'] : null], ['version_id' => $releaseVersionId, 'version_number' => $releaseNumber, 'source_staging_version_id' => (int) $versionId], $releaseReason, (int) $releaseEnvironment['id'], $releaseVersionId);
+            $result = $pdo->prepare('SELECT * FROM versions WHERE id=?');
+            $result->execute([$releaseVersionId]);
+            return $result->fetch();
         });
+    }
+
+    private function copyVersionSnapshot(PDO $pdo, $sourceId, $targetId)
+    {
+        $configs = $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,created_at,updated_at) SELECT ?,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,NOW(),NOW() FROM version_flags WHERE version_id=?');
+        $configs->execute([(int) $targetId, (int) $sourceId]);
+
+        $sourceFlags = $pdo->prepare('SELECT id,flag_id FROM version_flags WHERE version_id=?');
+        $sourceFlags->execute([(int) $sourceId]);
+        $targetFlag = $pdo->prepare('SELECT id FROM version_flags WHERE version_id=? AND flag_id=?');
+        $ruleRead = $pdo->prepare('SELECT * FROM rules WHERE version_flag_id=? ORDER BY priority,id');
+        $ruleInsert = $pdo->prepare('INSERT INTO rules (version_flag_id,target_type,effect,priority,target_group_id,created_at,updated_at) VALUES (?,?,?,?,?,NOW(),NOW())');
+        $userRead = $pdo->prepare('SELECT user_id FROM rule_users WHERE rule_id=? ORDER BY user_id');
+        $userInsert = $pdo->prepare('INSERT INTO rule_users (rule_id,user_id,created_at) VALUES (?,?,NOW())');
+        foreach ($sourceFlags->fetchAll() as $sourceFlag) {
+            $targetFlag->execute([(int) $targetId, (int) $sourceFlag['flag_id']]);
+            $targetFlagId = (int) $targetFlag->fetchColumn();
+            $ruleRead->execute([(int) $sourceFlag['id']]);
+            foreach ($ruleRead->fetchAll() as $rule) {
+                $ruleInsert->execute([$targetFlagId, $rule['target_type'], $rule['effect'], (int) $rule['priority'], $rule['target_group_id']]);
+                $newRuleId = (int) $pdo->lastInsertId();
+                $userRead->execute([(int) $rule['id']]);
+                foreach ($userRead->fetchAll() as $ruleUser) $userInsert->execute([$newRuleId, $ruleUser['user_id']]);
+            }
+        }
+        $groups = $pdo->prepare('INSERT INTO version_group_members (version_id,group_id,user_id) SELECT ?,group_id,user_id FROM version_group_members WHERE version_id=?');
+        $groups->execute([(int) $targetId, (int) $sourceId]);
     }
 
     public function rollback($environmentId, $targetVersionId, $userId, $reason)
@@ -153,7 +195,7 @@ final class VersionService
             $after[$row['flag_key']] = $row;
         }
         $keys = array_unique(array_merge(array_keys($before), array_keys($after)));
-        $fields = ['kill_switch','forced_value','default_value','rollout_enabled','rollout_percentage','fallback_value','rules'];
+        $fields = ['kill_switch','forced_value','default_value','fallback_value','rules'];
         $diff = [];
         foreach ($keys as $key) {
             $changes = [];

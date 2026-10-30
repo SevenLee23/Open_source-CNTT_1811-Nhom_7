@@ -6,7 +6,7 @@ The MySQL schema separates platform accounts (`users`) from application user IDs
 - `flags`, `target_groups`: project-level feature and audience definitions.
 - `versions`, `version_flags`, `rules`, `rule_users`, `version_group_members`: immutable configuration snapshots by environment.
 - `membership_flag_permissions`: grants an editor write access to selected features.
-- `api_keys`: account-scoped or environment-scoped read credentials stored as SHA-256 hashes; rotation revokes prior active keys.
+- `api_keys`: project-scoped read credentials stored as SHA-256 hashes; one active project key is shared by its environments and rotation revokes prior environment and project keys.
 - `users.account_type` and `users.parent_user_id`: owner/member/child identity and the parent-child account relationship.
 - `users.username`: optional unique login identifier (required by the application for child accounts); `email` is nullable so a child may add it later.
 - `users.is_active`: disables deleted subaccounts while retaining version and audit attribution; deleting also revokes their API keys.

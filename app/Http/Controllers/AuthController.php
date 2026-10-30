@@ -56,7 +56,7 @@ final class AuthController extends Controller
             $environment->execute([$projectId, 'Staging', 'staging', $now, $now]);
             $environment->execute([$projectId, 'Phát hành', 'production_sim', $now, $now]);
             (new \App\Services\ProjectProvisioningService())->installBuiltInFeatures($pdo, $projectId, $ownerId);
-            $apiKey = (new \App\Services\AccountApiKeyService())->issue($projectId, $ownerId);
+            $projectApiKey = (new \App\Services\ProjectApiKeyService())->issue($projectId);
             (new \App\Services\AuditLogService())->record($projectId, $ownerId, 'account.registered', 'account', $email, null, ['project_id' => $projectId], 'Đăng ký tài khoản');
             $pdo->commit();
             session_regenerate_id(true);
@@ -65,8 +65,8 @@ final class AuthController extends Controller
             $env = $pdo->prepare('SELECT id FROM environments WHERE project_id=? AND `key`=\'staging\'');
             $env->execute([$projectId]);
             $_SESSION['environment_id'] = (int) $env->fetchColumn();
-            $_SESSION['_new_account_api_key'] = $apiKey;
-            flash('success', 'Đăng ký thành công. Đã tạo workspace và API key riêng cho tài khoản.');
+            $_SESSION['_new_project_api_keys'] = [$projectId => $projectApiKey];
+            flash('success', 'Đăng ký thành công. Đã tạo workspace với một API key dùng chung cho dự án.');
             redirect('projects');
         } catch (\Throwable $exception) {
             if ($pdo->inTransaction()) $pdo->rollBack();

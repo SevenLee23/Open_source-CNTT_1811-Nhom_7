@@ -15,20 +15,20 @@ FeatureLab is a PHP 8.0 and MySQL application for managing feature flags by proj
 3. In a terminal at the repository root, run `C:\xampp\php\php.exe scripts\setup.php`.
 4. Open `http://localhost/Open_source-CNTT_1811-Nhom_7/`.
 
-The setup command creates the schema and demo records: one project, two environments, ten flags, three groups and 1,000 synthetic application user IDs. It prints the seeded environment API keys once. The seeded admin defaults to `admin@example.test`; set `APP_ADMIN_PASSWORD` before setup and change it before sharing the app. New users register with their email address and receive an account API key. Email confirmation requires an SMTP service and is not configured in this project.
+The setup command creates the schema and demo records: one project, two environments, ten flags, three groups and 1,000 synthetic application user IDs. It prints the seeded project's shared API key once. The seeded admin defaults to `admin@example.test`; set `APP_ADMIN_PASSWORD` before setup and change it before sharing the app. New users register with their email address and receive one API key for the project. Email confirmation requires an SMTP service and is not configured in this project.
 
 ## Main features
 
 - Project dashboard, project and environment switching, member roles and per-feature edit grants
-- Per-account API key creation and rotation; the secret is shown only once, plus admin-managed environment keys
-- Email registration/login on one shared page; child accounts use a username and may have an optional email. Only owner accounts receive an account-scoped API key, while child accounts can only toggle features
+- One API key per project shared by its environments; every API request explicitly selects `staging` or `production_sim`, keys are shown only once, and can be rotated by project admins
+- Email registration/login on one shared page; owner accounts create projects with separate Staging and release environments and one shared key
 - Owners can assign child accounts toggle permission per feature and project, then revoke child access
 - Platform admin manages the shared feature catalog; owners can only add catalog features to a project, not create new flags
-- Owners can create or deactivate projects; each project has its own API key and built-in feature catalog
+- Owners can create or deactivate projects; each project has Staging and release environments, one shared API key, and the built-in feature catalog
 - A published toggle change updates the shared project configuration consumed by the other accounts and clients in that environment
 - Feature and target-group configuration with user and group rules
 - Draft creation, validation, publish, version comparison and rollback-as-new-version
-- `POST /api/v1/evaluate` using account-scoped or environment-scoped bearer keys; account keys can select an environment in their workspace
+- `POST /api/v1/evaluate` using a project-scoped bearer key and a required `environment` request field
 - Append-only audit/decision records in MySQL; configuration can be downloaded as JSON and uploaded as a Staging draft; project logs can be uploaded as JSON/CSV and downloaded as CSV
 - Configuration changes and file imports are restricted to Staging; release environments display the published feature states as read-only
 - Demo client at `/demo-app/` with local fallback when the API cannot be reached

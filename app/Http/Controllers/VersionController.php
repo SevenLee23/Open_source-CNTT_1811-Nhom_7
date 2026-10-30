@@ -50,8 +50,8 @@ final class VersionController extends Controller
         $reason = trim((string) ($_POST['reason'] ?? ''));
         if ($reason === '') { flash('error', 'Ghi lý do phát hành trước khi tiếp tục.'); redirect('versions'); }
         try {
-            (new VersionService())->publish($versionId, $user['id'], $reason);
-            flash('success', 'Đã phát hành v' . $version['version_number'] . '.');
+            $published = (new VersionService())->publish($versionId, $user['id'], $reason);
+            flash('success', 'Đã phát hành Staging v' . $version['version_number'] . ' thành Release v' . $published['version_number'] . '.');
         } catch (\Throwable $exception) { flash('error', $exception->getMessage()); }
         redirect('versions');
     }

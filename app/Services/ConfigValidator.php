@@ -17,9 +17,6 @@ final class ConfigValidator
         $configs = $query->fetchAll();
         if (!$configs) throw new \DomainException('Phiên bản không có feature nào.');
         foreach ($configs as $config) {
-            if ((float) $config['rollout_percentage'] < 0 || (float) $config['rollout_percentage'] > 100) {
-                throw new \DomainException('Tỷ lệ rollout của ' . $config['key'] . ' phải nằm trong khoảng 0–100.');
-            }
             $rules = $pdo->prepare('SELECT r.*,g.project_id group_project_id FROM rules r LEFT JOIN target_groups g ON g.id=r.target_group_id WHERE r.version_flag_id=?');
             $rules->execute([(int) $config['id']]);
             foreach ($rules->fetchAll() as $rule) {
@@ -61,10 +58,8 @@ final class ConfigValidator
             if (isset($seen[$flag['key']])) throw new \DomainException('JSON có key feature trùng: ' . $flag['key']);
             $seen[$flag['key']] = true;
             if (!array_key_exists('default_value', $flag) || !is_bool($flag['default_value'])) throw new \DomainException('default_value phải là true hoặc false.');
-            foreach (['kill_switch','rollout_enabled','fallback_value'] as $booleanField) if (isset($flag[$booleanField]) && !is_bool($flag[$booleanField])) throw new \DomainException($booleanField . ' phải là true hoặc false.');
+            foreach (['kill_switch','fallback_value'] as $booleanField) if (isset($flag[$booleanField]) && !is_bool($flag[$booleanField])) throw new \DomainException($booleanField . ' phải là true hoặc false.');
             if (array_key_exists('forced_value', $flag) && $flag['forced_value'] !== null && !is_bool($flag['forced_value'])) throw new \DomainException('forced_value phải là true, false hoặc null.');
-            $rollout = $flag['rollout_percentage'] ?? 0;
-            if (!is_numeric($rollout) || (float) $rollout < 0 || (float) $rollout > 100) throw new \DomainException('rollout_percentage phải từ 0 đến 100.');
             $nameQuery = $pdo->prepare('SELECT f.id FROM flags f JOIN feature_catalog c ON c.id=f.catalog_feature_id AND c.is_active=1 WHERE f.project_id=? AND f.`key`=? AND f.is_active=1');
             $nameQuery->execute([(int) $projectId, $flag['key']]);
             if (!$nameQuery->fetchColumn()) throw new \DomainException('Feature không tồn tại trong dự án: ' . $flag['key']);

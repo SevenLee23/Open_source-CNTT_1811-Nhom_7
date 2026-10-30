@@ -16,7 +16,7 @@ final class FeatureFlagDemoSeeder
             $statement->execute([$adminEmail]);
             $adminId = $statement->fetchColumn();
             if (!$adminId) {
-                $insert = $pdo->prepare('INSERT INTO users (name,email,password,created_at,updated_at) VALUES (?,?,?,?,?)');
+                $insert = $pdo->prepare('INSERT INTO users (name,email,password,account_type,created_at,updated_at) VALUES (?,?,?,\'owner\',?,?)');
                 $now = date('Y-m-d H:i:s');
                 $insert->execute(['Project Admin', $adminEmail, password_hash($adminPassword, PASSWORD_DEFAULT), $now, $now]);
                 $adminId = (int) $pdo->lastInsertId();
@@ -29,8 +29,8 @@ final class FeatureFlagDemoSeeder
                 ->execute([$projectId, $adminId]);
 
             $environments = [
-                ['Staging', 'staging', Config::get('app.demo_keys.staging')],
-                ['Phát hành', 'production_sim', Config::get('app.demo_keys.production_sim')],
+                ['Staging', 'staging'],
+                ['Phát hành', 'production_sim'],
             ];
             foreach ($environments as $environment) {
                 $pdo->prepare('INSERT IGNORE INTO environments (project_id,name,`key`,created_at,updated_at) VALUES (?,?,?,?,?)')
@@ -104,15 +104,16 @@ final class FeatureFlagDemoSeeder
             if (!$existingGroupRule->fetchColumn()) $pdo->prepare("INSERT INTO rules (version_flag_id,target_type,effect,priority,target_group_id,created_at,updated_at) VALUES (?,'group','on',10,?,NOW(),NOW())")
                 ->execute([$betaConfig, $groupIds['beta_users']]);
 
-            $keyInsert = $pdo->prepare('INSERT IGNORE INTO api_keys (environment_id,name,key_prefix,key_hash,created_at) VALUES (?,?,?,?,NOW())');
-            foreach ($environments as $environment) {
-                $envId = $versions[$environment[1]][0];
-                $key = $environment[2];
-                $keyInsert->execute([$envId, 'Demo read-only key', substr($key, 0, 12), hash('sha256', $key)]);
-            }
+            $projectKey = Config::get('app.demo_keys.project');
+            $pdo->prepare('INSERT IGNORE INTO api_keys (environment_id,project_id,account_user_id,name,key_prefix,key_hash,created_at) VALUES (NULL,?,NULL,?,?,?,NOW())')
+                ->execute([$projectId, 'Demo project read-only key', substr($projectKey, 0, 12), hash('sha256', $projectKey)]);
+            $projectKeyState = $pdo->prepare('SELECT revoked_at FROM api_keys WHERE key_hash=?');
+            $projectKeyState->execute([hash('sha256', $projectKey)]);
+            $projectKeyRevokedAt = $projectKeyState->fetchColumn();
+            if ($projectKeyRevokedAt !== false && $projectKeyRevokedAt !== null) $projectKey = null;
 
             $pdo->commit();
-            return ['staging' => $environments[0][2], 'production_sim' => $environments[1][2]];
+            return ['project' => $projectKey];
         } catch (\Throwable $exception) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             throw $exception;

@@ -20,6 +20,17 @@ class Controller
         require $viewFile;
     }
 
+    protected function renderChild($name, array $data = [])
+    {
+        extract($data, EXTR_SKIP);
+        $viewFile = \App\Support\Config::get('root') . '/resources/views/' . $name . '.php';
+        if (!is_file($viewFile)) throw new \RuntimeException('Không tìm thấy view ' . $name);
+        ob_start();
+        require $viewFile;
+        $content = ob_get_clean();
+        require \App\Support\Config::get('root') . '/resources/views/child-layout.php';
+    }
+
     protected function json(array $data, $status = 200)
     {
         http_response_code($status);

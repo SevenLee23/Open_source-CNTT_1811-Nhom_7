@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS flags (
   description TEXT NULL,
   catalog_feature_id BIGINT UNSIGNED NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
+  emergency_kill_switch TINYINT(1) NOT NULL DEFAULT 0,
   created_at TIMESTAMP NULL,
   updated_at TIMESTAMP NULL,
   UNIQUE KEY flags_project_key_unique (project_id, `key`),

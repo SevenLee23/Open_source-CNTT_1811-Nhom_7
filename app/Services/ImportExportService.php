@@ -42,8 +42,7 @@ final class ImportExportService
                 'key' => $flag['key'], 'name' => $flag['name'], 'description' => $flag['description'],
                 'kill_switch' => (bool) $flag['kill_switch'], 'default_value' => (bool) $flag['default_value'],
                 'forced_value' => $flag['forced_value'] === null ? null : (bool) $flag['forced_value'],
-                'rollout_enabled' => (bool) $flag['rollout_enabled'], 'rollout_percentage' => (float) $flag['rollout_percentage'],
-                'fallback_value' => (bool) $flag['fallback_value'], 'rules' => $rules,
+                'fallback_value' => (bool) $flag['default_value'], 'rules' => $rules,
             ];
         }
         $groupQuery = $pdo->prepare('SELECT g.`key`,g.name,vgm.user_id FROM version_group_members vgm JOIN target_groups g ON g.id=vgm.group_id WHERE vgm.version_id=? ORDER BY g.`key`,vgm.user_id');
@@ -95,7 +94,7 @@ final class ImportExportService
             }
 
             $flagQuery = $pdo->prepare('SELECT f.id FROM flags f JOIN feature_catalog c ON c.id=f.catalog_feature_id AND c.is_active=1 WHERE f.project_id=? AND f.`key`=? AND f.is_active=1');
-            $configInsert = $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
+            $configInsert = $pdo->prepare('INSERT INTO version_flags (version_id,flag_id,kill_switch,default_value,rollout_enabled,rollout_percentage,fallback_value,forced_value,created_at,updated_at) VALUES (?,?,?, ?,0,0,?,?,?,?)');
             $ruleInsert = $pdo->prepare('INSERT INTO rules (version_flag_id,target_type,effect,priority,target_group_id,created_at,updated_at) VALUES (?,?,?,?,?,NOW(),NOW())');
             $userInsert = $pdo->prepare('INSERT INTO rule_users (rule_id,user_id,created_at) VALUES (?,?,NOW())');
             foreach ($payload['flags'] as $flag) {
@@ -103,7 +102,7 @@ final class ImportExportService
                 $flagId = (int) $flagQuery->fetchColumn();
                 if (!$flagId) throw new \DomainException('Feature không còn tồn tại: ' . $flag['key']);
                 $forced = array_key_exists('forced_value', $flag) && $flag['forced_value'] !== null ? (!empty($flag['forced_value']) ? 1 : 0) : null;
-                $configInsert->execute([(int) $draft['id'], $flagId, !empty($flag['kill_switch']) ? 1 : 0, !empty($flag['default_value']) ? 1 : 0, !empty($flag['rollout_enabled']) ? 1 : 0, (float) $flag['rollout_percentage'], !empty($flag['fallback_value']) ? 1 : 0, $forced, date('Y-m-d H:i:s'), date('Y-m-d H:i:s')]);
+                $configInsert->execute([(int) $draft['id'], $flagId, 0, !empty($flag['default_value']) ? 1 : 0, !empty($flag['default_value']) ? 1 : 0, $forced, date('Y-m-d H:i:s'), date('Y-m-d H:i:s')]);
                 $configId = (int) $pdo->lastInsertId();
                 foreach (($flag['rules'] ?? []) as $rule) {
                     $groupId = ($rule['target_type'] ?? '') === 'group' ? ($groupIds[$rule['group_key']] ?? null) : null;

@@ -38,6 +38,11 @@ $indexExists = function ($table, $index) use ($pdo) {
     $query->execute([$table, $index]);
     return (bool) $query->fetchColumn();
 };
+// Normalize databases created from the older standalone schema.sql, which used
+// password_hash while the application and canonical migration use password.
+if (!$columnExists('users', 'password') && $columnExists('users', 'password_hash')) {
+    $pdo->exec('ALTER TABLE users CHANGE COLUMN password_hash password VARCHAR(255) NOT NULL');
+}
 if (!$columnExists('users', 'account_type')) $pdo->exec("ALTER TABLE users ADD account_type VARCHAR(20) NOT NULL DEFAULT 'owner'");
 if (!$columnExists('users', 'username')) $pdo->exec('ALTER TABLE users ADD username VARCHAR(80) NULL');
 if (!$columnExists('users', 'parent_user_id')) $pdo->exec('ALTER TABLE users ADD parent_user_id BIGINT UNSIGNED NULL');
@@ -45,6 +50,7 @@ if (!$columnExists('users', 'is_active')) $pdo->exec('ALTER TABLE users ADD is_a
 if (!$columnExists('projects', 'is_active')) $pdo->exec('ALTER TABLE projects ADD is_active TINYINT(1) NOT NULL DEFAULT 1');
 if (!$columnExists('flags', 'catalog_feature_id')) $pdo->exec('ALTER TABLE flags ADD catalog_feature_id BIGINT UNSIGNED NULL');
 if (!$columnExists('flags', 'is_active')) $pdo->exec('ALTER TABLE flags ADD is_active TINYINT(1) NOT NULL DEFAULT 1');
+if (!$columnExists('flags', 'emergency_kill_switch')) $pdo->exec('ALTER TABLE flags ADD emergency_kill_switch TINYINT(1) NOT NULL DEFAULT 0');
 if (!$indexExists('users', 'users_parent_user_index')) $pdo->exec('ALTER TABLE users ADD KEY users_parent_user_index (parent_user_id)');
 if (!$indexExists('users', 'users_username_unique')) $pdo->exec('ALTER TABLE users ADD UNIQUE KEY users_username_unique (username)');
 $emailNullable = $pdo->query("SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='email'")->fetchColumn();
@@ -84,5 +90,5 @@ foreach ($emptyProjects as $project) {
 }
 echo 'Database schema and demo data are ready.' . PHP_EOL;
 echo 'Admin: ' . \App\Support\Config::get('app.admin_email') . PHP_EOL;
-echo 'Staging API key: ' . $keys['staging'] . PHP_EOL;
-echo 'Production Sim API key: ' . $keys['production_sim'] . PHP_EOL;
+if (!empty($keys['project'])) echo 'Project API key (use with an explicit environment field): ' . $keys['project'] . PHP_EOL;
+else echo 'Project API key has already been rotated or revoked; generate a new key from the Projects screen if needed.' . PHP_EOL;

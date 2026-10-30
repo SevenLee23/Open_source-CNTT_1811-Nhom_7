@@ -12,38 +12,60 @@ final class ProjectController extends Controller
         $user = $this->user();
         $projects = Project::forUser((int) $user['id']);
         $environments = [];
-        $keys = [];
+        $projectApiKey = null;
+        $newProjectApiKey = null;
         $activeProjectId = Auth::projectId();
         $activeProject = $activeProjectId ? Project::find($activeProjectId) : null;
-        $canManageProjectKey = $activeProject && ($user['account_type'] ?? '') === 'owner' && (int) $activeProject['created_by'] === (int) $user['id'];
         if ($activeProjectId) {
             $environments = \App\Models\Environment::forProject($activeProjectId);
-            $query = Database::connection()->prepare('SELECT environment_id,key_prefix,last_used_at,created_at FROM api_keys WHERE revoked_at IS NULL AND environment_id IN (SELECT id FROM environments WHERE project_id=?) ORDER BY id DESC');
-            $query->execute([$activeProjectId]);
-            $keys = $query->fetchAll();
+            $newProjectApiKeys = $_SESSION['_new_project_api_keys'] ?? [];
+            unset($_SESSION['_new_project_api_keys']);
+            $newProjectApiKey = $newProjectApiKeys[$activeProjectId] ?? null;
+            if (Auth::isAdmin($activeProjectId)) {
+                $pdo = Database::connection();
+                $query = $pdo->prepare('SELECT id,key_prefix,last_used_at,created_at FROM api_keys WHERE project_id=? AND environment_id IS NULL AND account_user_id IS NULL AND revoked_at IS NULL ORDER BY id DESC LIMIT 1');
+                $query->execute([$activeProjectId]);
+                $projectApiKey = $query->fetch() ?: null;
+                if (!$projectApiKey) {
+                    $pdo->beginTransaction();
+                    try {
+                        $newProjectApiKey = (new \App\Services\ProjectApiKeyService())->rotate($activeProjectId);
+                        $pdo->commit();
+                        flash('success', 'Đã tạo API key dùng chung cho dự án. Các API key môi trường cũ đã bị thu hồi; hãy cập nhật client và luôn gửi trường environment.');
+                        (new \App\Services\AuditLogService())->record($activeProjectId, (int) $user['id'], 'api_key.project_created', 'project', (string) ($activeProject['key'] ?? $activeProjectId), null, ['key_prefix' => substr($newProjectApiKey, 0, 12)], 'Tạo API key dùng chung cho dự án');
+                    } catch (\Throwable $exception) {
+                        if ($pdo->inTransaction()) $pdo->rollBack();
+                        throw $exception;
+                    }
+                    $query->execute([$activeProjectId]);
+                    $projectApiKey = $query->fetch() ?: null;
+                } else {
+                    $legacyCount = $pdo->prepare('SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL AND id<>? AND (project_id=? OR environment_id IN (SELECT id FROM environments WHERE project_id=?))');
+                    $legacyCount->execute([(int) $projectApiKey['id'], $activeProjectId, $activeProjectId]);
+                    if ((int) $legacyCount->fetchColumn() > 0) {
+                        $pdo->beginTransaction();
+                        try {
+                            $newProjectApiKey = (new \App\Services\ProjectApiKeyService())->rotate($activeProjectId);
+                            $pdo->commit();
+                            flash('success', 'Đã chuyển sang một API key dùng chung cho dự án. Các key cũ đã bị thu hồi; hãy cập nhật client và luôn gửi trường environment.');
+                            (new \App\Services\AuditLogService())->record($activeProjectId, (int) $user['id'], 'api_key.project_migrated', 'project', (string) ($activeProject['key'] ?? $activeProjectId), null, ['key_prefix' => substr($newProjectApiKey, 0, 12)], 'Chuyển API key môi trường sang key dùng chung dự án');
+                        } catch (\Throwable $exception) {
+                            if ($pdo->inTransaction()) $pdo->rollBack();
+                            throw $exception;
+                        }
+                        $query->execute([$activeProjectId]);
+                        $projectApiKey = $query->fetch() ?: null;
+                    }
+                }
+            }
         }
-        $newApiKey = $_SESSION['_new_api_key'] ?? null;
-        unset($_SESSION['_new_api_key']);
-        $newAccountApiKey = $_SESSION['_new_account_api_key'] ?? null;
-        unset($_SESSION['_new_account_api_key']);
-        $accountKeyQuery = Database::connection()->prepare('SELECT key_prefix,last_used_at,created_at FROM api_keys WHERE project_id=? AND account_user_id=? AND environment_id IS NULL AND revoked_at IS NULL ORDER BY id DESC LIMIT 1');
-        $accountKeyQuery->execute([(int) $activeProjectId, (int) $user['id']]);
-        $accountApiKey = $accountKeyQuery->fetch() ?: null;
-        if (!$accountApiKey && $canManageProjectKey && $activeProjectId && Auth::isAdmin($activeProjectId)) {
-            $newAccountApiKey = (new \App\Services\AccountApiKeyService())->issue($activeProjectId, (int) $user['id']);
-            $_SESSION['_new_account_api_key'] = $newAccountApiKey;
-            (new \App\Services\AuditLogService())->record($activeProjectId, (int) $user['id'], 'account.api_key_created', 'account', $user['email'], null, ['key_prefix' => substr($newAccountApiKey, 0, 12)], 'Cấp API key tài khoản');
-            $accountKeyQuery->execute([(int) $activeProjectId, (int) $user['id']]);
-            $accountApiKey = $accountKeyQuery->fetch() ?: null;
-            unset($_SESSION['_new_account_api_key']);
-        }
-        $this->render('projects', compact('user','projects','environments','keys','activeProjectId','activeProject','canManageProjectKey','newApiKey','newAccountApiKey','accountApiKey'));
+        $this->render('projects', compact('user','projects','environments','projectApiKey','newProjectApiKey','activeProjectId','activeProject'));
     }
 
     public function create()
     {
         $user = $this->user();
-        if (($user['account_type'] ?? '') !== 'owner') { http_response_code(403); exit('Chỉ tài khoản cha mới được tạo dự án.'); }
+        if (($user['account_type'] ?? '') !== 'owner') { http_response_code(403); exit('Chỉ chủ dự án mới được tạo dự án.'); }
         $name = trim((string) ($_POST['name'] ?? ''));
         $key = strtolower(trim((string) ($_POST['key'] ?? '')));
         if ($key === '') $key = preg_replace('/[^a-z0-9]+/', '-', strtolower($name));
@@ -52,8 +74,8 @@ final class ProjectController extends Controller
             redirect('projects');
         }
         try {
-            $apiKey = null;
-            $projectId = Database::transaction(function ($pdo) use ($name, $key, $user, &$apiKey) {
+            $projectApiKey = null;
+            $projectId = Database::transaction(function ($pdo) use ($name, $key, $user, &$projectApiKey) {
                 $now = date('Y-m-d H:i:s');
                 $insert = $pdo->prepare('INSERT INTO projects (name,`key`,description,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)');
                 $insert->execute([$name, $key, trim((string) ($_POST['description'] ?? '')), (int) $user['id'], $now, $now]);
@@ -62,16 +84,17 @@ final class ProjectController extends Controller
                     ->execute([$id, (int) $user['id'], $now, $now]);
                 $env = $pdo->prepare('INSERT INTO environments (project_id,name,`key`,created_at,updated_at) VALUES (?,?,?,?,?)');
                 $env->execute([$id, 'Staging', 'staging', $now, $now]);
+                $stagingId = (int) $pdo->lastInsertId();
                 $env->execute([$id, 'Phát hành', 'production_sim', $now, $now]);
                 (new \App\Services\ProjectProvisioningService())->installBuiltInFeatures($pdo, $id, (int) $user['id']);
-                $apiKey = (new \App\Services\AccountApiKeyService())->issue($id, (int) $user['id']);
+                $projectApiKey = (new \App\Services\ProjectApiKeyService())->issue($id);
                 (new \App\Services\AuditLogService())->record($id, (int) $user['id'], 'project.created', 'project', $key, null, ['name' => $name], 'Tạo dự án');
                 return $id;
             });
-            $_SESSION['_new_account_api_key'] = $apiKey;
+            $_SESSION['_new_project_api_keys'] = [$projectId => $projectApiKey];
             $_SESSION['project_id'] = $projectId;
             $_SESSION['environment_id'] = 0;
-            flash('success', 'Dự án đã được tạo, gồm các tính năng có sẵn và API key riêng.');
+            flash('success', 'Dự án đã được tạo với hai môi trường và một API key dùng chung cho dự án.');
             redirect('projects');
         } catch (\Throwable $exception) {
             flash('error', 'Không tạo được dự án: ' . $exception->getMessage());
@@ -82,12 +105,12 @@ final class ProjectController extends Controller
     public function delete()
     {
         $user = $this->user();
-        if (($user['account_type'] ?? '') !== 'owner') { http_response_code(403); exit('Chỉ tài khoản cha mới được xóa dự án.'); }
+        if (($user['account_type'] ?? '') !== 'owner') { http_response_code(403); exit('Chỉ chủ dự án mới được xóa dự án.'); }
         $projectId = (int) ($_POST['project_id'] ?? 0);
         $projectQuery = Database::connection()->prepare('SELECT id,name,`key` FROM projects WHERE id=? AND created_by=? AND is_active=1');
         $projectQuery->execute([$projectId, (int) $user['id']]);
         $project = $projectQuery->fetch();
-        if (!$project) { flash('error', 'Không tìm thấy dự án thuộc tài khoản cha.'); redirect('projects'); }
+        if (!$project) { flash('error', 'Không tìm thấy dự án thuộc chủ dự án.'); redirect('projects'); }
         $pdo = Database::connection();
         try {
             $pdo->beginTransaction();
@@ -118,36 +141,25 @@ final class ProjectController extends Controller
             http_response_code(403);
             exit('Bạn không có quyền truy cập dự án này.');
         }
+        $environmentQuery = Database::connection()->prepare('SELECT id,`key` FROM environments WHERE project_id=? ORDER BY id');
+        $environmentQuery->execute([$projectId]);
+        $projectEnvironments = $environmentQuery->fetchAll();
+        $validEnvironmentIds = array_map('intval', array_column($projectEnvironments, 'id'));
+        if (!$environmentId || !in_array($environmentId, $validEnvironmentIds, true)) {
+            $staging = array_values(array_filter($projectEnvironments, static function ($environment) { return strtolower((string) $environment['key']) === 'staging'; }));
+            $environmentId = $staging ? (int) $staging[0]['id'] : (int) ($projectEnvironments[0]['id'] ?? 0);
+            $submittedEnvironmentId = (int) ($_POST['environment_id'] ?? 0);
+            if ($submittedEnvironmentId > 0 && $submittedEnvironmentId !== $environmentId) flash('error', 'Môi trường vừa chọn không thuộc project đó. Đã chọn môi trường thử nghiệm mặc định.');
+        }
         $_SESSION['project_id'] = $projectId;
-        if ($environmentId) {
-            $check = Database::connection()->prepare('SELECT id FROM environments WHERE id=? AND project_id=?');
-            $check->execute([$environmentId, $projectId]);
-            if (!$check->fetchColumn()) {
-                http_response_code(422);
-                exit('Môi trường không thuộc dự án đã chọn.');
-            }
-            $_SESSION['environment_id'] = $environmentId;
-        } else {
-            $_SESSION['environment_id'] = 0;
-        }
-        redirect(trim((string) ($_POST['return_to'] ?? 'dashboard'), '/'));
-    }
-
-    public function addEnvironment()
-    {
-        $projectId = $this->projectId();
-        $this->requireAdmin($projectId);
-        $name = trim((string) ($_POST['name'] ?? ''));
-        $key = strtolower(trim((string) ($_POST['key'] ?? '')));
-        if ($name === '' || !preg_match('/^[a-z][a-z0-9_-]{1,79}$/', $key)) {
-            flash('error', 'Tên môi trường hoặc key chưa hợp lệ.');
-            redirect('projects');
-        }
-        $pdo = Database::connection();
-        $pdo->prepare('INSERT INTO environments (project_id,name,`key`,created_at,updated_at) VALUES (?,?,?,?,?)')->execute([$projectId, $name, $key, date('Y-m-d H:i:s'), date('Y-m-d H:i:s')]);
-        (new \App\Services\AuditLogService())->record($projectId, (int) $this->user()['id'], 'environment.created', 'environment', $key, null, ['name' => $name], 'Tạo môi trường');
-        flash('success', 'Đã thêm môi trường.');
-        redirect('projects');
+        $_SESSION['environment_id'] = $environmentId;
+        $returnTo = trim((string) ($_POST['return_to'] ?? 'dashboard'), '/');
+        $allowedRoutes = ['dashboard','flags','rules','versions','members','projects','audit','admin/features'];
+        if (!in_array($returnTo, $allowedRoutes, true)) $returnTo = 'dashboard';
+        if ($returnTo === 'members' && !Auth::isAdmin($projectId)) $returnTo = 'dashboard';
+        if ($returnTo === 'audit' && !Auth::canViewAudit($projectId)) $returnTo = 'dashboard';
+        if ($returnTo === 'admin/features' && !Auth::isPlatformAdmin($user)) $returnTo = 'dashboard';
+        redirect($returnTo);
     }
 
     public function rotateApiKey()
@@ -155,22 +167,16 @@ final class ProjectController extends Controller
         $user = $this->user();
         $projectId = $this->projectId();
         $this->requireAdmin($projectId);
-        $environmentId = (int) ($_POST['environment_id'] ?? 0);
-        $check = Database::connection()->prepare('SELECT id,`key` FROM environments WHERE id=? AND project_id=?');
-        $check->execute([$environmentId, $projectId]);
-        $environment = $check->fetch();
-        if (!$environment) { flash('error', 'Môi trường không thuộc dự án hiện tại.'); redirect('projects'); }
-        $token = rtrim(strtr(base64_encode(random_bytes(36)), '+/', '-_'), '=');
+        $project = Project::find($projectId);
+        if (!$project) { flash('error', 'Không tìm thấy dự án hiện tại.'); redirect('projects'); }
         $pdo = Database::connection();
         try {
             $pdo->beginTransaction();
-            $pdo->prepare('UPDATE api_keys SET revoked_at=NOW() WHERE environment_id=? AND revoked_at IS NULL')->execute([$environmentId]);
-            $pdo->prepare('INSERT INTO api_keys (environment_id,name,key_prefix,key_hash,created_at) VALUES (?,?,?,?,NOW())')
-                ->execute([$environmentId, 'Environment read key', substr($token, 0, 12), hash('sha256', $token)]);
-            (new \App\Services\AuditLogService())->record($projectId, (int) $user['id'], 'api_key.rotated', 'environment', $environment['key'], null, ['key_prefix' => substr($token, 0, 12)], 'Đổi API key môi trường');
+            $token = (new \App\Services\ProjectApiKeyService())->rotate($projectId);
+            (new \App\Services\AuditLogService())->record($projectId, (int) $user['id'], 'api_key.project_rotated', 'project', (string) $project['key'], null, ['key_prefix' => substr($token, 0, 12)], 'Đổi API key dùng chung cho dự án');
             $pdo->commit();
-            $_SESSION['_new_api_key'] = $token;
-            flash('success', 'Đã tạo API key mới. Key cũ đã bị thu hồi; sao chép key mới ngay bây giờ.');
+            $_SESSION['_new_project_api_keys'] = [$projectId => $token];
+            flash('success', 'Đã tạo API key dự án mới. Tất cả key cũ đều bị thu hồi; sao chép key mới và cập nhật client cho cả hai môi trường.');
         } catch (\Throwable $exception) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             flash('error', 'Không đổi được API key: ' . $exception->getMessage());
@@ -178,27 +184,4 @@ final class ProjectController extends Controller
         redirect('projects');
     }
 
-    public function rotateAccountApiKey()
-    {
-        $user = $this->user();
-        if ($user['account_type'] !== 'owner') { http_response_code(403); exit('Chỉ chủ tài khoản mới quản lý API key tài khoản.'); }
-        $projectId = $this->projectId();
-        $owned = Database::connection()->prepare('SELECT id FROM projects WHERE id=? AND created_by=? AND is_active=1');
-        $owned->execute([$projectId, (int) $user['id']]);
-        if (!$owned->fetchColumn()) { http_response_code(403); exit('API key chỉ được quản lý bởi chủ sở hữu dự án.'); }
-        if (!Auth::isAdmin($projectId)) { http_response_code(403); exit('Bạn không phải quản trị viên của workspace này.'); }
-        $pdo = Database::connection();
-        try {
-            $pdo->beginTransaction();
-            $token = (new \App\Services\AccountApiKeyService())->rotate($projectId, (int) $user['id']);
-            (new \App\Services\AuditLogService())->record($projectId, (int) $user['id'], 'account.api_key_rotated', 'account', $user['email'], null, ['key_prefix' => substr($token, 0, 12)], 'Đổi API key tài khoản');
-            $pdo->commit();
-            $_SESSION['_new_account_api_key'] = $token;
-            flash('success', 'Đã đổi API key tài khoản. Hãy lưu key mới ngay; key cũ đã bị thu hồi.');
-        } catch (\Throwable $exception) {
-            if ($pdo->inTransaction()) $pdo->rollBack();
-            flash('error', 'Không đổi được API key: ' . $exception->getMessage());
-        }
-        redirect('projects');
-    }
 }
